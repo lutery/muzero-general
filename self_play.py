@@ -163,11 +163,11 @@ class SelfPlay:
                     # 这里使用了MCTS
                     # 利用模型对环境的学习，模拟N步的执行，从中找到最好奖励的动作，选择进行执行（有点像贪心算法）
                     root, mcts_info = MCTS(self.config).run(
-                        self.model,
-                        stacked_observations,
-                        self.game.legal_actions(),
-                        self.game.to_play(),
-                        True,
+                        self.model, # 模型
+                        stacked_observations, # 历史帧堆叠
+                        self.game.legal_actions(), # 返回所有的合法动作
+                        self.game.to_play(), # 当前的游戏玩家id
+                        True, # 是否给动作增加噪音
                     )
                     action = self.select_action(
                         root,
@@ -292,12 +292,21 @@ class MCTS:
         hidden state given the current observation.
         We then run a Monte Carlo Tree Search using only action sequences and the model
         learned by the network.
+
+        model, # 模型
+        observation, # 历史帧堆叠和当前帧信息
+        legal_actions # 返回所有的合法动作
+        to_play # 当前的游戏玩家id
+        add_exploration_noise  # 是否给动作增加噪音
+        override_root_with：传入已构建的搜索树节点，避免重新构建搜索树，提高搜索效率
         """
         if override_root_with:
             root = override_root_with
             root_predicted_value = None
         else:
+            # 构建搜索根节点
             root = Node(0)
+            # 将观察帧迁移到对应的device上
             observation = (
                 torch.tensor(observation)
                 .float()

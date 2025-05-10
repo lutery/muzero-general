@@ -157,6 +157,10 @@ class MuZeroFullyConnectedNetwork(AbstractNetwork):
         return policy_logits, value
 
     def representation(self, observation):
+        '''
+        observation：环境观察
+        '''
+        # 提取观察特征
         encoded_state = self.representation_network(
             observation.view(observation.shape[0], -1)
         )
@@ -196,6 +200,9 @@ class MuZeroFullyConnectedNetwork(AbstractNetwork):
         return next_encoded_state_normalized, reward
 
     def initial_inference(self, observation):
+        '''
+        observation：环境观察
+        '''
         encoded_state = self.representation(observation)
         policy_logits, value = self.prediction(encoded_state)
         # reward equal to 0 for consistency
@@ -603,18 +610,27 @@ class MuZeroResidualNetwork(AbstractNetwork):
         return policy, value
 
     def representation(self, observation):
+        '''
+        observation：环境观察
+
+        这里的作用是提取环境的特征，并将特征值归一化
+        '''
+        # 提取obs的特征
         encoded_state = self.representation_network(observation)
 
         # Scale encoded state between [0, 1] (See appendix paper Training)
+        # encoded_state.view 进行内部feature map展平，shape变成(batch_size, channels, w * h = S)
+        # min_encoded_state 获取每个通道中的最小值的特征
         min_encoded_state = (
             encoded_state.view(
                 -1,
-                encoded_state.shape[1],
-                encoded_state.shape[2] * encoded_state.shape[3],
+                encoded_state.shape[1], # 应该是通道数
+                encoded_state.shape[2] * encoded_state.shape[3], # 这里应该是尺寸面积，展平？
             )
-            .min(2, keepdim=True)[0]
-            .unsqueeze(-1)
+            .min(2, keepdim=True)[0] # 类似torch.max 找到维度为2的最小值，并返回，比如encoded_state.view 后的 shape 为 [32, 256, 36]  (batch_size, channels, H*W) -> 输出 shape: [32, 256, 1]
+            .unsqueeze(-1) # 在增加维度，最后的shape=[32, 256, 1, 1]
         )
+        # 这里是获取特征中每个通道的最大值
         max_encoded_state = (
             encoded_state.view(
                 -1,
@@ -624,8 +640,11 @@ class MuZeroResidualNetwork(AbstractNetwork):
             .max(2, keepdim=True)[0]
             .unsqueeze(-1)
         )
+        # 特征最大值和最小值差值
         scale_encoded_state = max_encoded_state - min_encoded_state
+        # 如果特征差值过小则对应的通道增加1e-5
         scale_encoded_state[scale_encoded_state < 1e-5] += 1e-5
+        # 归一化特征
         encoded_state_normalized = (
             encoded_state - min_encoded_state
         ) / scale_encoded_state
@@ -678,6 +697,9 @@ class MuZeroResidualNetwork(AbstractNetwork):
         return next_encoded_state_normalized, reward
 
     def initial_inference(self, observation):
+        '''
+        observation：环境观察
+        '''
         encoded_state = self.representation(observation)
         policy_logits, value = self.prediction(encoded_state)
         # reward equal to 0 for consistency

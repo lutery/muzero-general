@@ -169,6 +169,13 @@ class Game(AbstractGame):
 
         Returns:
             An array of integers, subset of the action space.
+        方法用于返回当前游戏状态下所有合法的动作
+        返回 [0,1,2,3] 四个可能的动作
+        对应 Breakout 游戏的四种操作:
+        0: NOOP (无操作)
+        1: FIRE (发射)
+        2: RIGHT (向右移动)
+        3: LEFT (向左移动)
         """
         return list(range(4))
 
