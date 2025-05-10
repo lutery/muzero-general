@@ -41,9 +41,15 @@ class MuZero:
 
     def __init__(self, game_name, config=None, split_resources_in=1):
         # Load the game and the config from the module with the game name
+        '''
+        game_name: 游戏名称，以atari游戏为例
+        '''
         try:
+            # 动态导入游戏模块
             game_module = importlib.import_module("games." + game_name)
+            # 获取游戏模块中的Game类和MuZeroConfig类
             self.Game = game_module.Game
+            # 加载游戏配置，每个游戏内部对应着一个独立的配置类
             self.config = game_module.MuZeroConfig()
         except ModuleNotFoundError as err:
             print(
@@ -52,6 +58,7 @@ class MuZero:
             raise err
 
         # Overwrite the config
+        # 如果外部有传入配置文件，则使用外部的配置文件
         if config:
             if type(config) is dict:
                 for param, value in config.items():
@@ -68,7 +75,7 @@ class MuZero:
         numpy.random.seed(self.config.seed)
         torch.manual_seed(self.config.seed)
 
-        # Manage GPUs
+        # Manage GPUs 这里是为了防止出现即被配置使用GPU但是又使用了GPU的情况，不重要
         if self.config.max_num_gpus == 0 and (
             self.config.selfplay_on_gpu
             or self.config.train_on_gpu
@@ -77,6 +84,7 @@ class MuZero:
             raise ValueError(
                 "Inconsistent MuZeroConfig: max_num_gpus = 0 but GPU requested by selfplay_on_gpu or train_on_gpu or reanalyse_on_gpu."
             )
+        
         if (
             self.config.selfplay_on_gpu
             or self.config.train_on_gpu
@@ -93,6 +101,7 @@ class MuZero:
         if 1 < self.num_gpus:
             self.num_gpus = math.floor(self.num_gpus)
 
+        # 分布式训练框架 todo 观察时如何使用的
         ray.init(num_gpus=total_gpus, ignore_reinit_error=True)
 
         # Checkpoint and replay buffer used to initialize workers
@@ -117,8 +126,11 @@ class MuZero:
         }
         self.replay_buffer = {}
 
+        # 返回一个远程执行的异步Actor对象
         cpu_actor = CPUActor.remote()
         cpu_weights = cpu_actor.get_initial_weights.remote(self.config)
+        # 远程调用仅仅是是返回一个对象的引用
+        # 这里是深拷贝，所以需要实际的对象，需要使用ray.get返回引用的实际值放到self.checkpoint中
         self.checkpoint["weights"], self.summary = copy.deepcopy(ray.get(cpu_weights))
 
         # Workers
@@ -132,15 +144,18 @@ class MuZero:
     def train(self, log_in_tensorboard=True):
         """
         Spawn ray workers and launch the training.
+        训练模型
 
         Args:
             log_in_tensorboard (bool): Start a testing worker and log its performance in TensorBoard.
         """
+        # 创建模型保存的目录
         if log_in_tensorboard or self.config.save_model:
             self.config.results_path.mkdir(parents=True, exist_ok=True)
 
         # Manage GPUs
         if 0 < self.num_gpus:
+            # self.config.train_on_gpu： 是否在gpu上训练
             num_gpus_per_worker = self.num_gpus / (
                 self.config.train_on_gpu
                 + self.config.num_workers * self.config.selfplay_on_gpu
@@ -152,7 +167,7 @@ class MuZero:
         else:
             num_gpus_per_worker = 0
 
-        # Initialize workers
+        # Initialize workers 这里的options应该时ray的选项
         self.training_worker = trainer.Trainer.options(
             num_cpus=0,
             num_gpus=num_gpus_per_worker if self.config.train_on_gpu else 0,
@@ -479,6 +494,18 @@ class MuZero:
         dm.close_all()
 
 
+'''
+num_cpus=0
+
+指定这个 Actor 需要分配的 CPU 核心数
+设为 0 表示不需要专门分配 CPU 资源
+这个 Actor 仍然会使用 CPU，但不会被 Ray 的调度器计入资源限制
+num_gpus=0
+
+指定这个 Actor 需要分配的 GPU 数量
+设为 0 表示这个 Actor 不使用 GPU
+在代码中这个 Actor (CPUActor) 专门用于获取模型的 CPU 权重
+'''
 @ray.remote(num_cpus=0, num_gpus=0)
 class CPUActor:
     # Trick to force DataParallel to stay on CPU to get weights on CPU even if there is a GPU
@@ -486,8 +513,13 @@ class CPUActor:
         pass
 
     def get_initial_weights(self, config):
+        '''
+        构建 MuZero 网络模型
+        返回模型的权重和模型的结构
+        '''
         model = models.MuZeroNetwork(config)
         weigths = model.get_weights()
+        # 不重要，就是将单个换行符换乘两个换行符，可能是为了结构更加清晰
         summary = str(model).replace("\n", " \n\n")
         return weigths, summary
 
@@ -620,31 +652,38 @@ def load_model_menu(muzero, game_name):
 
 
 if __name__ == "__main__":
+    # todo 这里2个参数和3个参数的区别是什么
     if len(sys.argv) == 2:
+        # 两个参数只有游戏名称
         # Train directly with: python muzero.py cartpole
         muzero = MuZero(sys.argv[1])
         muzero.train()
     elif len(sys.argv) == 3:
         # Train directly with: python muzero.py cartpole '{"lr_init": 0.01}'
+        # 三个参数，第二个参数是配置文件
         config = json.loads(sys.argv[2])
         muzero = MuZero(sys.argv[1], config)
         muzero.train()
     else:
+        # 如果什么都不传入参数，好像是会让用户选择要执行的游戏
         print("\nWelcome to MuZero! Here's a list of games:")
         # Let user pick a game
+        # 列举games目录下的所有游戏
         games = [
             filename.stem
             for filename in sorted(list((pathlib.Path.cwd() / "games").glob("*.py")))
             if filename.name != "abstract_game.py"
         ]
+        # 这里是为了防止用户输入错误的游戏名称，所以让用户选择序号
         for i in range(len(games)):
             print(f"{i}. {games[i]}")
         choice = input("Enter a number to choose the game: ")
         valid_inputs = [str(i) for i in range(len(games))]
+        # 校验输入的序号是否在范围内
         while choice not in valid_inputs:
             choice = input("Invalid input, enter a number listed above: ")
 
-        # Initialize MuZero
+        # Initialize MuZero 根据选择的游戏名称初始化MuZero
         choice = int(choice)
         game_name = games[choice]
         muzero = MuZero(game_name)
@@ -662,9 +701,12 @@ if __name__ == "__main__":
                 "Exit",
             ]
             print()
+            # 选择要执行的操作，训练，加载模型，诊断模型，渲染游戏，手动测试游戏，超参数搜索
+            # 选择操作的序号
             for i in range(len(options)):
                 print(f"{i}. {options[i]}")
 
+            # 让用户输入操作的序号，选择需要的操作
             choice = input("Enter a number to choose an action: ")
             valid_inputs = [str(i) for i in range(len(options))]
             while choice not in valid_inputs:

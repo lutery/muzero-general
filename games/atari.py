@@ -27,7 +27,7 @@ class MuZeroConfig:
         self.observation_shape = (3, 96, 96)  # Dimensions of the game observation, must be 3D (channel, height, width). For a 1D array, please reshape it to (1, 1, length of array)
         self.action_space = list(range(4))  # Fixed list of all possible actions. You should only edit the length
         self.players = list(range(1))  # List of players. You should only edit the length
-        self.stacked_observations = 32  # Number of previous observations and previous actions to add to the current observation
+        self.stacked_observations = 32  # Number of previous observations and previous actions to add to the current observation 这个参数是为了让MuZero能够记住之前的状态，保留前32帧的图像信息
 
         # Evaluate
         self.muzero_player = 0  # Turn Muzero begins to play (0: MuZero plays first, 1: MuZero plays second)

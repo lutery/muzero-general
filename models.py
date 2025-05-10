@@ -5,21 +5,25 @@ import torch
 
 
 class MuZeroNetwork:
+    '''
+    这个应该是公共的特征提取层
+    '''
     def __new__(cls, config):
         if config.network == "fullyconnected":
             return MuZeroFullyConnectedNetwork(
-                config.observation_shape,
-                config.stacked_observations,
-                len(config.action_space),
-                config.encoding_size,
-                config.fc_reward_layers,
-                config.fc_value_layers,
-                config.fc_policy_layers,
-                config.fc_representation_layers,
-                config.fc_dynamics_layers,
-                config.support_size,
+                config.observation_shape, # 观察空间shape
+                config.stacked_observations, # todo
+                len(config.action_space), # 动作空间大小
+                config.encoding_size, # 输出的特征编码的大小
+                config.fc_reward_layers, # todo
+                config.fc_value_layers, # todo
+                config.fc_policy_layers, # todo
+                config.fc_representation_layers, # 中间隐藏层的大小
+                config.fc_dynamics_layers, # todo
+                config.support_size, # todo
             )
         elif config.network == "resnet":
+            # 对于图像数据，使用resnet来提取特征
             return MuZeroResidualNetwork(
                 config.observation_shape,
                 config.stacked_observations,
@@ -67,6 +71,9 @@ class AbstractNetwork(ABC, torch.nn.Module):
         pass
 
     def get_weights(self):
+        '''
+        获取网络的权重，并将权重转移到CPU上
+        '''
         return dict_to_cpu(self.state_dict())
 
     def set_weights(self, weights):
@@ -78,6 +85,9 @@ class AbstractNetwork(ABC, torch.nn.Module):
 
 
 class MuZeroFullyConnectedNetwork(AbstractNetwork):
+    '''
+    全链接特征提取层
+    '''
     def __init__(
         self,
         observation_shape,
@@ -93,8 +103,19 @@ class MuZeroFullyConnectedNetwork(AbstractNetwork):
     ):
         super().__init__()
         self.action_space_size = action_space_size
+        # todo 根据后文件，感觉是预测均值和方差吧？
         self.full_support_size = 2 * support_size + 1
 
+        '''
+        observation_shape[0]
+        * observation_shape[1]
+        * observation_shape[2] = 这里的应该是观察空间展平后的大小
+
+        * (stacked_observations + 1)： 不懂是什么
+        stacked_observations * observation_shape[1] * observation_shape[2]：这个应该是保留的前32帧的图像信息
+
+        # 这里构建的应该是一个全连接的特征提取层，并且使用了DataParallel来支持多GPU训练
+        '''
         self.representation_network = torch.nn.DataParallel(
             mlp(
                 observation_shape[0]
@@ -107,6 +128,7 @@ class MuZeroFullyConnectedNetwork(AbstractNetwork):
             )
         )
 
+        # 这里继续上一步的特征提取层，集合了动作空间，构建对应的特征全链接提取层
         self.dynamics_encoded_state_network = torch.nn.DataParallel(
             mlp(
                 encoding_size + self.action_space_size,
@@ -114,13 +136,17 @@ class MuZeroFullyConnectedNetwork(AbstractNetwork):
                 encoding_size,
             )
         )
+
+        # 这里是奖励的全链接提取层
         self.dynamics_reward_network = torch.nn.DataParallel(
             mlp(encoding_size, fc_reward_layers, self.full_support_size)
         )
 
+        # 构建预测的动作
         self.prediction_policy_network = torch.nn.DataParallel(
             mlp(encoding_size, fc_policy_layers, self.action_space_size)
         )
+        # 构建预测状态的价值
         self.prediction_value_network = torch.nn.DataParallel(
             mlp(encoding_size, fc_value_layers, self.full_support_size)
         )
@@ -204,6 +230,9 @@ class MuZeroFullyConnectedNetwork(AbstractNetwork):
 
 
 def conv3x3(in_channels, out_channels, stride=1):
+    '''
+    这里的卷积核大小是3x3，步长是1，填充是1，那么输入和输出的大小是一样的
+    '''
     return torch.nn.Conv2d(
         in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False
     )
@@ -241,9 +270,12 @@ class DownSample(torch.nn.Module):
             padding=1,
             bias=False,
         )
+        # 尺寸不变化，通道数减半
         self.resblocks1 = torch.nn.ModuleList(
             [ResidualBlock(out_channels // 2) for _ in range(2)]
         )
+
+        # 尺寸减半，通道数翻倍回到out_channels
         self.conv2 = torch.nn.Conv2d(
             out_channels // 2,
             out_channels,
@@ -252,13 +284,17 @@ class DownSample(torch.nn.Module):
             padding=1,
             bias=False,
         )
+        # 尺寸不变化，通道数也不变化
         self.resblocks2 = torch.nn.ModuleList(
             [ResidualBlock(out_channels) for _ in range(3)]
         )
+        # 尺寸减半，通道数不变化
         self.pooling1 = torch.nn.AvgPool2d(kernel_size=3, stride=2, padding=1)
+        # 尺寸不变，通道数不变化
         self.resblocks3 = torch.nn.ModuleList(
             [ResidualBlock(out_channels) for _ in range(3)]
         )
+        # 尺寸减半，通道数不变化
         self.pooling2 = torch.nn.AvgPool2d(kernel_size=3, stride=2, padding=1)
 
     def forward(self, x):
@@ -276,9 +312,18 @@ class DownSample(torch.nn.Module):
 
 
 class DownsampleCNN(torch.nn.Module):
+    '''
+    普通的CNN特征提取层
+    '''
     def __init__(self, in_channels, out_channels, h_w):
+        '''
+        h_w: 目标下采样后的大小 这里得注意一下得和代码中的尺寸一致，否则会出错
+        '''
         super().__init__()
-        mid_channels = (in_channels + out_channels) // 2
+        mid_channels = (in_channels + out_channels) // 2 # 计算中间通道数
+        # 第一层卷积核大小是h_w[0] * 2，步长是4，填充是2，大概率原始的代码中这里的尺寸会减半
+        # 第二层卷积核大小是5，步长是1，填充是2：尺寸不变化
+        # 第三层卷积核大小是3，步长是2，填充是1：尺寸减半
         self.features = torch.nn.Sequential(
             torch.nn.Conv2d(
                 in_channels, mid_channels, kernel_size=h_w[0] * 2, stride=4, padding=2
@@ -303,12 +348,17 @@ class RepresentationNetwork(torch.nn.Module):
         observation_shape,
         stacked_observations,
         num_blocks,
-        num_channels,
+        num_channels, # 卷积层采输出的通道数
         downsample,
     ):
         super().__init__()
         self.downsample = downsample
         if self.downsample:
+            # 如果有设置下采样，那么就选择使用哪种下采样的方法
+            # observation_shape[0]：表示单帧图像的通道数
+            # observation_shape[0] * (stacked_observations + 1)：表示所有堆叠的帧的总通道数，其中 + 1表示当前帧
+            # + stacked_observations : 为每个历史帧添加额外的信息通道 todo
+            # 以下两个特征提取层最后
             if self.downsample == "resnet":
                 self.downsample_net = DownSample(
                     observation_shape[0] * (stacked_observations + 1)
@@ -316,6 +366,7 @@ class RepresentationNetwork(torch.nn.Module):
                     num_channels,
                 )
             elif self.downsample == "CNN":
+                # DownsampleCNN 多传入了一个目标下采样后的大小尺寸
                 self.downsample_net = DownsampleCNN(
                     observation_shape[0] * (stacked_observations + 1)
                     + stacked_observations,
@@ -327,11 +378,15 @@ class RepresentationNetwork(torch.nn.Module):
                 )
             else:
                 raise NotImplementedError('downsample should be "resnet" or "CNN".')
+        # 这里应该要设置else吧，毕竟有downsample时，forward中会有不同的处理
+        # 如果不进行下采样，那么就直接使用卷积层恒等特征提取，可能针对比较简答的游戏
         self.conv = conv3x3(
             observation_shape[0] * (stacked_observations + 1) + stacked_observations,
             num_channels,
         )
         self.bn = torch.nn.BatchNorm2d(num_channels)
+        # 最后进行一次resnet，通道数不变，大小不变
+        # todo 了解这边的尺寸变化
         self.resblocks = torch.nn.ModuleList(
             [ResidualBlock(num_channels) for _ in range(num_blocks)]
         )
@@ -450,9 +505,28 @@ class MuZeroResidualNetwork(AbstractNetwork):
         support_size,
         downsample,
     ):
+        '''
+        observation_shape,      # 观察空间的形状，例如(3, 96, 96)表示96x96的RGB图像
+        stacked_observations,   # 堆叠的观察帧数，保存历史状态信息
+        action_space_size,     # 动作空间大小，即可选动作数量
+        num_blocks,            # ResNet中残差块的数量
+        num_channels,          # 卷积层的通道数
+        reduced_channels_reward,  # 奖励预测头的通道数
+        reduced_channels_value,   # 价值预测头的通道数
+        reduced_channels_policy,  # 策略预测头的通道数
+        fc_reward_layers,      # 奖励预测全连接层的配置
+        fc_value_layers,       # 价值预测全连接层的配置
+        fc_policy_layers,      # 策略预测全连接层的配置
+        support_size,          # 输出分布的支持范围大小 todo
+        downsample,           # 下采样方法，可选"resnet"或"CNN"或者None或者false不进行下采样
+        '''
         super().__init__()
         self.action_space_size = action_space_size
         self.full_support_size = 2 * support_size + 1
+
+        # downsample todo 这里可以不选择下采样？
+        # math.ceil(observation_shape[1] / 16) 应该是下采样16倍后的尺寸，所以这里初始的图像大小能被16整除
+        # reduced_channels_reward 表示下采样后奖励的特征通道数
         block_output_size_reward = (
             (
                 reduced_channels_reward
@@ -463,6 +537,7 @@ class MuZeroResidualNetwork(AbstractNetwork):
             else (reduced_channels_reward * observation_shape[1] * observation_shape[2])
         )
 
+        ## reduced_channels_value 表示下采样后价值的特征通道数
         block_output_size_value = (
             (
                 reduced_channels_value
@@ -473,6 +548,7 @@ class MuZeroResidualNetwork(AbstractNetwork):
             else (reduced_channels_value * observation_shape[1] * observation_shape[2])
         )
 
+        # reduced_channels_policy 表示下采样后动作策略的特征通道数
         block_output_size_policy = (
             (
                 reduced_channels_policy
@@ -483,6 +559,7 @@ class MuZeroResidualNetwork(AbstractNetwork):
             else (reduced_channels_policy * observation_shape[1] * observation_shape[2])
         )
 
+        # 构建Resnet特征提取层
         self.representation_network = torch.nn.DataParallel(
             RepresentationNetwork(
                 observation_shape,
@@ -493,6 +570,7 @@ class MuZeroResidualNetwork(AbstractNetwork):
             )
         )
 
+        # todo 这里的作用
         self.dynamics_network = torch.nn.DataParallel(
             DynamicsNetwork(
                 num_blocks,
@@ -504,6 +582,7 @@ class MuZeroResidualNetwork(AbstractNetwork):
             )
         )
 
+        # todo 这里的作用
         self.prediction_network = torch.nn.DataParallel(
             PredictionNetwork(
                 action_space_size,
@@ -634,8 +713,17 @@ def mlp(
     output_activation=torch.nn.Identity,
     activation=torch.nn.ELU,
 ):
+    '''
+    input_size: 输入层大小
+    layer_sizes: 隐藏层大小列表
+    output_size: 输出层大小
+    output_activation: 输出层激活函数
+    activation: 隐藏层激活函数
+    '''
+
     sizes = [input_size] + layer_sizes + [output_size]
     layers = []
+    # 构建MLP层
     for i in range(len(sizes) - 1):
         act = activation if i < len(sizes) - 2 else output_activation
         layers += [torch.nn.Linear(sizes[i], sizes[i + 1]), act()]
