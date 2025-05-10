@@ -16,27 +16,39 @@ class SelfPlay:
 
     def __init__(self, initial_checkpoint, Game, config, seed):
         self.config = config
-        self.game = Game(seed)
+        self.game = Game(seed) # 游戏的实例，比如breakout
 
         # Fix random generator seed
         numpy.random.seed(seed)
         torch.manual_seed(seed)
 
-        # Initialize the network
+        # Initialize the network 
+        # 构建了相同的MuZeroNetwork，并且设置为评估模式
+        # todo 感觉应该是用来采集样本的
         self.model = models.MuZeroNetwork(self.config)
         self.model.set_weights(initial_checkpoint["weights"])
         self.model.to(torch.device("cuda" if self.config.selfplay_on_gpu else "cpu"))
         self.model.eval()
 
     def continuous_self_play(self, shared_storage, replay_buffer, test_mode=False):
+        '''
+        shared_storage: ray引用对象的共享存储区，todo 感觉和模型权重有关系
+        replay_buffer: ray引用对象的重放缓冲区
+        test_mode: 是否是测试模式，默认是False，影响到action的选择
+        '''
+
+        # 从参数共享存储区对象获取当前训练步数 和 是否已经中断训练的标识
         while ray.get(
             shared_storage.get_info.remote("training_step")
         ) < self.config.training_steps and not ray.get(
             shared_storage.get_info.remote("terminate")
-        ):
+        ):  
+            # 更新模型缓存
             self.model.set_weights(ray.get(shared_storage.get_info.remote("weights")))
 
             if not test_mode:
+                # 训练模式，随机选择动作 visit_softmax_temperature_fn返回的是一个softmax的温度，标签平滑？todo
+                # temperature_threshold感觉是温度阈值，不能小于的作用吧 todo
                 game_history = self.play_game(
                     self.config.visit_softmax_temperature_fn(
                         trained_steps=ray.get(
@@ -52,6 +64,7 @@ class SelfPlay:
                 replay_buffer.save_game.remote(game_history, shared_storage)
 
             else:
+                # 测试模型，从这里来看，test模式选择动作是最大最好的动作
                 # Take the best action (no exploration) in test mode
                 game_history = self.play_game(
                     0,
@@ -112,7 +125,10 @@ class SelfPlay:
     ):
         """
         Play one game with actions based on the Monte Carlo tree search at each moves.
+
+        render：是否渲染采集样本时的画面
         """
+        # 游戏样本存储缓冲区
         game_history = GameHistory()
         observation = self.game.reset()
         game_history.action_history.append(0)
@@ -126,21 +142,26 @@ class SelfPlay:
             self.game.render()
 
         with torch.no_grad():
+            # 没有结束、采集的样本小于max_moves（也就是游戏的步数）
             while (
                 not done and len(game_history.action_history) <= self.config.max_moves
             ):
+                # 这里校验观察的shape，必须是像素空间
                 assert (
                     len(numpy.array(observation).shape) == 3
                 ), f"Observation should be 3 dimensionnal instead of {len(numpy.array(observation).shape)} dimensionnal. Got observation of shape: {numpy.array(observation).shape}"
                 assert (
                     numpy.array(observation).shape == self.config.observation_shape
                 ), f"Observation should match the observation_shape defined in MuZeroConfig. Expected {self.config.observation_shape} but got {numpy.array(observation).shape}."
+                # 获取历史帧信息（包含观察和动作）和当前环境观察
                 stacked_observations = game_history.get_stacked_observations(
                     -1, self.config.stacked_observations, len(self.config.action_space)
                 )
 
-                # Choose the action
+                # Choose the action 计算动作的方式
                 if opponent == "self" or muzero_player == self.game.to_play():
+                    # 这里使用了MCTS
+                    # 利用模型对环境的学习，模拟N步的执行，从中找到最好奖励的动作，选择进行执行（有点像贪心算法）
                     root, mcts_info = MCTS(self.config).run(
                         self.model,
                         stacked_observations,
@@ -482,16 +503,16 @@ class GameHistory:
     """
 
     def __init__(self):
-        self.observation_history = []
-        self.action_history = []
-        self.reward_history = []
-        self.to_play_history = []
-        self.child_visits = []
-        self.root_values = []
-        self.reanalysed_predicted_root_values = None
+        self.observation_history = [] # 环境观察
+        self.action_history = [] # 执行的动作
+        self.reward_history = [] # 奖励
+        self.to_play_history = [] # todo
+        self.child_visits = [] # todo
+        self.root_values = [] # todo
+        self.reanalysed_predicted_root_values = None # todo
         # For PER
-        self.priorities = None
-        self.game_priority = None
+        self.priorities = None # todo
+        self.game_priority = None # todo
 
     def store_search_statistics(self, root, action_space):
         # Turn visit count from root into a policy
@@ -516,15 +537,24 @@ class GameHistory:
         """
         Generate a new observation with the observation at the index position
         and num_stacked_observations past observations and actions stacked.
-        """
-        # Convert to positive index
-        index = index % len(self.observation_history)
 
+        index： 我看到有传入-1
+        num_stacked_observations：需要堆叠的历史帧长度num_stacked_observations
+        """
+        # Convert to positive index 
+        # 如果传入-1，则表示获取缓冲区最后一个数据
+        index = index % len(self.observation_history)
+        
+        # 获取最后一个观察obs
         stacked_observations = self.observation_history[index].copy()
         for past_observation_index in reversed(
             range(index - num_stacked_observations, index)
         ):
             if 0 <= past_observation_index:
+                # self.observation_history[past_observation_index： 获取对应索引的观察数据
+                # self.action_history[past_observation_index + 1]：获取当前观察下执行的动作
+                # 将观察和观察下执行的动作合并起来作为历史帧信息
+                # / action_space_size是将动作值归一化道0/1之间，标准化
                 previous_observation = numpy.concatenate(
                     (
                         self.observation_history[past_observation_index],
@@ -536,6 +566,7 @@ class GameHistory:
                     )
                 )
             else:
+                # 如果不足stacked_observations长度的帧信息则已0填充
                 previous_observation = numpy.concatenate(
                     (
                         numpy.zeros_like(self.observation_history[index]),
@@ -543,10 +574,12 @@ class GameHistory:
                     )
                 )
 
+            # 将历史帧信息填充到缓冲区
             stacked_observations = numpy.concatenate(
                 (stacked_observations, previous_observation)
             )
 
+        # 返回对接好的历史帧和当前帧信息 todo 查看这里的shape
         return stacked_observations
 
 

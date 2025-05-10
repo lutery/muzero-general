@@ -126,7 +126,7 @@ class MuZero:
         }
         self.replay_buffer = {}
 
-        # 返回一个远程执行的异步Actor对象
+        # 返回一个远程执行的异步Actor对象 todo 这里的cpu_actor是干嘛的
         cpu_actor = CPUActor.remote()
         cpu_weights = cpu_actor.get_initial_weights.remote(self.config)
         # 远程调用仅仅是是返回一个对象的引用
@@ -156,29 +156,51 @@ class MuZero:
         # Manage GPUs
         if 0 < self.num_gpus:
             # self.config.train_on_gpu： 是否在gpu上训练
+            # self.config.selfplay_on_gpu： 是否在gpu上自我对弈
+            # 这里大部分的配置应该是bool值，每个+表示一个运行选项，比如是否在gpu上训练，是否使用gpu进行游戏验证运行等等
+            '''
+                        每个 worker 的 GPU 数量 = 总 GPU 数量 / 需要 GPU 的总进程数
+                        示例计算
+假设配置如下:
+
+num_gpus = 4 (总共 4 个 GPU)
+train_on_gpu = True (1)
+num_workers = 10, selfplay_on_gpu = True (10)
+log_in_tensorboard = True (1)
+use_last_model_value = True, reanalyse_on_gpu = True (1)
+
+num_gpus_per_worker = 4 / (1 + 10 + 1 + 1) = 4/13 ≈ 0.31
+            '''
             num_gpus_per_worker = self.num_gpus / (
                 self.config.train_on_gpu
                 + self.config.num_workers * self.config.selfplay_on_gpu
                 + log_in_tensorboard * self.config.selfplay_on_gpu
                 + self.config.use_last_model_value * self.config.reanalyse_on_gpu
             )
+            # todo 这个事干嘛？
             if 1 < num_gpus_per_worker:
                 num_gpus_per_worker = math.floor(num_gpus_per_worker)
         else:
             num_gpus_per_worker = 0
 
         # Initialize workers 这里的options应该时ray的选项
+        # 这里的num_gpus应该时每个worker进程分配多少个gpu的资源
+        # 这里remote调用的Trainer的__init__方法，并返回一个remote对象
         self.training_worker = trainer.Trainer.options(
             num_cpus=0,
             num_gpus=num_gpus_per_worker if self.config.train_on_gpu else 0,
         ).remote(self.checkpoint, self.config)
 
+        # 构建一个异步的存储器，看起来和权重、参数有关系
         self.shared_storage_worker = shared_storage.SharedStorage.remote(
             self.checkpoint,
             self.config,
         )
+        # 设置训练是否中断标识为false，用于控制器各个异步进程是否继续运行
         self.shared_storage_worker.set_info.remote("terminate", False)
 
+        # 看起来重放经验缓冲区 并且保存了缓冲区 
+        # 那么采集训练样本时会是连续的吗？todo
         self.replay_buffer_worker = replay_buffer.ReplayBuffer.remote(
             self.checkpoint, self.replay_buffer, self.config
         )
@@ -189,6 +211,7 @@ class MuZero:
                 num_gpus=num_gpus_per_worker if self.config.reanalyse_on_gpu else 0,
             ).remote(self.checkpoint, self.config)
 
+        # 构建num_workers个 self-play 的 worker，感觉应该是采集训练样本的 todo
         self.self_play_workers = [
             self_play.SelfPlay.options(
                 num_cpus=0,
@@ -202,7 +225,8 @@ class MuZero:
             for seed in range(self.config.num_workers)
         ]
 
-        # Launch workers
+        # Launch workers 这里应该是类似进程的start，对远程对象运行起来
+        # 这里应该像是在采集训练数据
         [
             self_play_worker.continuous_self_play.remote(
                 self.shared_storage_worker, self.replay_buffer_worker

@@ -19,6 +19,7 @@ class ReplayBuffer:
         self.buffer = copy.deepcopy(initial_buffer)
         self.num_played_games = initial_checkpoint["num_played_games"]
         self.num_played_steps = initial_checkpoint["num_played_steps"]
+        # total_samples 有多少个样本已经在 buffer 中，初始化时为0
         self.total_samples = sum(
             [len(game_history.root_values) for game_history in self.buffer.values()]
         )
@@ -317,7 +318,8 @@ class Reanalyse:
         numpy.random.seed(self.config.seed)
         torch.manual_seed(self.config.seed)
 
-        # Initialize the network
+        # Initialize the network 这里也有一个相同的模型 todo 作用是什么？
+        # 设置为了 eval 模式，难道是类似 test？
         self.model = models.MuZeroNetwork(self.config)
         self.model.set_weights(initial_checkpoint["weights"])
         self.model.to(torch.device("cuda" if self.config.reanalyse_on_gpu else "cpu"))

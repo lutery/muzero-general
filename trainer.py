@@ -16,24 +16,30 @@ class Trainer:
     """
 
     def __init__(self, initial_checkpoint, config):
+        ''''
+        initial_checkpoint: 模型的权重工
+        config: 配置参数
+        '''
         self.config = config
 
         # Fix random generator seed
         numpy.random.seed(self.config.seed)
         torch.manual_seed(self.config.seed)
 
-        # Initialize the network
+        # Initialize the network 构建模型并加载权重
         self.model = models.MuZeroNetwork(self.config)
         self.model.set_weights(copy.deepcopy(initial_checkpoint["weights"]))
         self.model.to(torch.device("cuda" if self.config.train_on_gpu else "cpu"))
         self.model.train()
 
+        # 训练的次数
         self.training_step = initial_checkpoint["training_step"]
 
+        # 只要有一个GPU可用就会使用GPU，如果没有那么就打印出来
         if "cuda" not in str(next(self.model.parameters()).device):
             print("You are not training on GPU.\n")
 
-        # Initialize the optimizer
+        # Initialize the optimizer  构建并加载优化器权重
         if self.config.optimizer == "SGD":
             self.optimizer = torch.optim.SGD(
                 self.model.parameters(),
