@@ -475,6 +475,18 @@ class PredictionNetwork(torch.nn.Module):
         block_output_size_value,
         block_output_size_policy,
     ):
+        '''
+        num_blocks: 残差块的数量
+        num_channels：resnet输出的卷积通道数
+        reduced_channels_value：输出的价值通道数
+        reduced_channels_policy：输出的动作通道数
+        block_output_size_value：卷积后输入到全链接层的展平后的大小
+        block_output_size_policy：卷积后输入到全链接层的展平后的大小
+        fc_value_layers：全链接层的层数
+        fc_policy_layers：全链接层的层数
+        action_space_size：动作的输出维度
+        full_support_size：价值的输出维度
+        '''
         super().__init__()
         self.resblocks = torch.nn.ModuleList(
             [ResidualBlock(num_channels) for _ in range(num_blocks)]
@@ -599,7 +611,7 @@ class MuZeroResidualNetwork(AbstractNetwork):
             )
         )
 
-        # todo 这里的作用
+        # todo 这里的作用 看代码，预测的是动作和价值
         self.prediction_network = torch.nn.DataParallel(
             PredictionNetwork(
                 action_space_size,
@@ -616,6 +628,9 @@ class MuZeroResidualNetwork(AbstractNetwork):
         )
 
     def prediction(self, encoded_state):
+        '''
+        注意，这里输出的value时一个多维的数据，而不是一个标量值
+        '''
         policy, value = self.prediction_network(encoded_state)
         return policy, value
 
@@ -709,10 +724,15 @@ class MuZeroResidualNetwork(AbstractNetwork):
     def initial_inference(self, observation):
         '''
         observation：环境观察
+        初始化推理，应该时最开始的时候模型预测的动作、价值、奖励，环境特征嵌入
         '''
         encoded_state = self.representation(observation)
         policy_logits, value = self.prediction(encoded_state)
         # reward equal to 0 for consistency
+        '''
+        创建初始奖励向量，将中间位置设为1，其他位置为0
+        这是为了保持一致性，因为初始状态没有真实的奖励值
+        '''
         reward = torch.log(
             (
                 torch.zeros(1, self.full_support_size)
@@ -767,17 +787,32 @@ def support_to_scalar(logits, support_size):
     Transform a categorical representation to a scalar
     See paper appendix Network Architecture
     """
-    # Decode to a scalar
+    # Decode to a scalar 将预测的分布转换为概率分布
     probabilities = torch.softmax(logits, dim=1)
+    '''
+    torch.tensor([x for x in range(-support_size, support_size + 1)])
+    假设 support_size = 300
+    生成范围为 [-300, 300] 的向量
+    输出形状: [601]
+
+    .expand(probabilities.shape)
+    假设 probabilities.shape = [32, 601]（批量大小为32）
+    将支持向量扩展到与概率分布相同的形状
+    输出形状: [32, 601]
+    '''
     support = (
         torch.tensor([x for x in range(-support_size, support_size + 1)])
         .expand(probabilities.shape)
         .float()
         .to(device=probabilities.device)
     )
+
+    # 有点像C51的强化学习，计算概率分布的期望值
+    # todo 调试这里看维度变化
     x = torch.sum(support * probabilities, dim=1, keepdim=True)
 
     # Invert the scaling (defined in https://arxiv.org/abs/1805.11593)
+    # 使用特定公式进行反向变换，恢复原始数值范围
     x = torch.sign(x) * (
         ((torch.sqrt(1 + 4 * 0.001 * (torch.abs(x) + 1 + 0.001)) - 1) / (2 * 0.001))
         ** 2

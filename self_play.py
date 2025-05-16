@@ -341,14 +341,17 @@ class MCTS:
             # 将观察传给模型获取预测的动作、奖励、隐藏状态
             # 初始化模型的推理状态
             (
-                root_predicted_value,
-                reward,
-                policy_logits,
-                hidden_state,
+                root_predicted_value, # 价值
+                reward, # 奖励
+                policy_logits, # 动作的概率分布
+                hidden_state, # 特征状态嵌入
             ) = model.initial_inference(observation)
+        
+            # 将价值分布（Q值分布）转换为标量值，也就是期望值
             root_predicted_value = models.support_to_scalar(
                 root_predicted_value, self.config.support_size
             ).item()
+            # 将奖励分布转换为标量值，也就是期望值
             reward = models.support_to_scalar(reward, self.config.support_size).item()
             assert (
                 legal_actions
@@ -509,6 +512,12 @@ class Node:
         """
         We expand a node using the value, reward and policy prediction obtained from the
         neural network.
+
+        actions: 所有可能的动作
+        to_play: 玩家的id
+        reward：奖励的期望值
+        policy_logits: 动作概率分布
+        hidden_state: 观察特征提取潜入值
         """
         self.to_play = to_play
         self.reward = reward
