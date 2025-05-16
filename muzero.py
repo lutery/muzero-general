@@ -676,7 +676,7 @@ def load_model_menu(muzero, game_name):
 
 
 if __name__ == "__main__":
-    # todo 这里2个参数和3个参数的区别是什么
+    # 这里2个参数和3个参数的区别是什么
     if len(sys.argv) == 2:
         # 两个参数只有游戏名称
         # Train directly with: python muzero.py cartpole

@@ -127,6 +127,7 @@ class SelfPlay:
         Play one game with actions based on the Monte Carlo tree search at each moves.
 
         render：是否渲染采集样本时的画面
+        opponent：对手，主要针对竞技游戏，类似下棋这种游戏的对手是p1 和 p2 切换的游戏
         """
         # 游戏样本存储缓冲区
         game_history = GameHistory()
@@ -159,8 +160,10 @@ class SelfPlay:
                 )
 
                 # Choose the action 计算动作的方式
+                # self表示类似下棋的游戏，需要采用MCTS的方式，这样才能进行的下去
+                # muzero_player == self.game.to_play判断的是当前的玩家是否和游戏的玩家一致，说明也是符合下棋类的角色切换游戏
                 if opponent == "self" or muzero_player == self.game.to_play():
-                    # 这里使用了MCTS
+                    # 这里使用了MCTS 主要用于pvp的游戏
                     # 利用模型对环境的学习，模拟N步的执行，从中找到最好奖励的动作，选择进行执行（有点像贪心算法）
                     root, mcts_info = MCTS(self.config).run(
                         self.model, # 模型
@@ -183,6 +186,7 @@ class SelfPlay:
                             f"Root value for player {self.game.to_play()}: {root.value():.2f}"
                         )
                 else:
+                    # 这边应该就是属于pve的游戏，就比较简单了
                     action, root = self.select_opponent_action(
                         opponent, stacked_observations
                     )
@@ -209,8 +213,26 @@ class SelfPlay:
     def select_opponent_action(self, opponent, stacked_observations):
         """
         Select opponent action for evaluating MuZero level.
+        opponent: 对手类型
+        "self":
+        表示自对弈模式，即 MuZero 和自己对弈
+        使用 MCTS (蒙特卡洛树搜索) 来选择动作
+        主要用于类似围棋、象棋等双人对弈游戏
+        "human":
+        表示人类玩家作为对手
+        MuZero 会给出动作建议，但最终动作由人类选择
+        用于人机交互测试场景
+        "expert":
+        表示使用预定义的专家系统作为对手
+        调用 game.expert_agent() 来获取动作
+        用于与已有的强AI系统对比测试
+        "random":
+        表示使用随机策略的对手
+        从合法动作中随机选择一个动作
+        用于基准测试或简单评估
         """
         if opponent == "human":
+            # 但是在这里hunman使用的是已有的模型进行模拟
             root, mcts_info = MCTS(self.config).run(
                 self.model,
                 stacked_observations,
@@ -225,8 +247,10 @@ class SelfPlay:
             )
             return self.game.human_to_action(), root
         elif opponent == "expert":
+            # 这里需要依赖游戏本身支持生成最好的动作
             return self.game.expert_agent(), None
         elif opponent == "random":
+            # 这里就很简答了，随机选择一个动作
             assert (
                 self.game.legal_actions()
             ), f"Legal actions should not be an empty array. Got {self.game.legal_actions()}."
@@ -300,6 +324,7 @@ class MCTS:
         add_exploration_noise  # 是否给动作增加噪音
         override_root_with：传入已构建的搜索树节点，避免重新构建搜索树，提高搜索效率
         """
+        # 首先构建搜索树
         if override_root_with:
             root = override_root_with
             root_predicted_value = None
@@ -313,6 +338,8 @@ class MCTS:
                 .unsqueeze(0)
                 .to(next(model.parameters()).device)
             )
+            # 将观察传给模型获取预测的动作、奖励、隐藏状态
+            # 初始化模型的推理状态
             (
                 root_predicted_value,
                 reward,

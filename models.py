@@ -152,6 +152,9 @@ class MuZeroFullyConnectedNetwork(AbstractNetwork):
         )
 
     def prediction(self, encoded_state):
+        '''
+        根据提取的环境特征预测动作和动作的价值
+        '''
         policy_logits = self.prediction_policy_network(encoded_state)
         value = self.prediction_value_network(encoded_state)
         return policy_logits, value
@@ -159,6 +162,8 @@ class MuZeroFullyConnectedNetwork(AbstractNetwork):
     def representation(self, observation):
         '''
         observation：环境观察
+
+        return 返回提取的特征嵌入 并归一化
         '''
         # 提取观察特征
         encoded_state = self.representation_network(
@@ -202,10 +207,15 @@ class MuZeroFullyConnectedNetwork(AbstractNetwork):
     def initial_inference(self, observation):
         '''
         observation：环境观察
+        初始化推理，应该时最开始的时候模型预测的动作、价值、奖励，环境特征嵌入
         '''
         encoded_state = self.representation(observation)
         policy_logits, value = self.prediction(encoded_state)
         # reward equal to 0 for consistency
+        '''
+        创建初始奖励向量，将中间位置设为1，其他位置为0
+        这是为了保持一致性，因为初始状态没有真实的奖励值
+        '''
         reward = torch.log(
             (
                 torch.zeros(1, self.full_support_size)
