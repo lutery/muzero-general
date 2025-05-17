@@ -61,6 +61,7 @@ class SelfPlay:
                     0,
                 )
 
+                # 将一轮游戏的记录存储在重放缓冲区中
                 replay_buffer.save_game.remote(game_history, shared_storage)
 
             else:
@@ -75,6 +76,8 @@ class SelfPlay:
                 )
 
                 # Save to the shared storage
+                # 保存测试过程中的游戏记录（分数、步数等）
+                # 存储到checkpoints中
                 shared_storage.set_info.remote(
                     {
                         "episode_length": len(game_history.action_history) - 1,
@@ -85,6 +88,8 @@ class SelfPlay:
                     }
                 )
                 if 1 < len(self.config.players):
+                    # 多人游戏
+                    # 则分开记录不同玩家的分数
                     shared_storage.set_info.remote(
                         {
                             "muzero_reward": sum(
@@ -103,9 +108,16 @@ class SelfPlay:
                     )
 
             # Managing the self-play / training ratio
+            # 粗略的延迟等待训练进程上来，如果不行就加入更加精细的while循环
+            # self_play_delay是一个超参数，表示的是自对弈的延迟时间
             if not test_mode and self.config.self_play_delay:
                 time.sleep(self.config.self_play_delay)
+            # 这里的self.config.ratio是一个超参数，表示的是自对弈和训练的比例
+            # 具体看readme
             if not test_mode and self.config.ratio:
+                # 这里的动作是保证训练和环境采集的平衡
+                # 如果采集的步数小于训练的步数，则继续采集
+                # 如果采集的步数大于训练的步数，则继续训练，采集进行sleep等待
                 while (
                     ray.get(shared_storage.get_info.remote("training_step"))
                     / max(
@@ -117,7 +129,8 @@ class SelfPlay:
                     and not ray.get(shared_storage.get_info.remote("terminate"))
                 ):
                     time.sleep(0.5)
-
+        
+        # 采集结束，关闭游戏
         self.close_game()
 
     def play_game(
@@ -165,6 +178,7 @@ class SelfPlay:
                 if opponent == "self" or muzero_player == self.game.to_play():
                     # 这里使用了MCTS 主要用于pvp的游戏
                     # 利用模型对环境的学习，模拟N步的执行，从中找到最好奖励的动作，选择进行执行（有点像贪心算法）
+                    # 返回搜索的根节点和搜索树的信息
                     root, mcts_info = MCTS(self.config).run(
                         self.model, # 模型
                         stacked_observations, # 历史帧堆叠
@@ -172,6 +186,8 @@ class SelfPlay:
                         self.game.to_play(), # 当前的游戏玩家id
                         True, # 是否给动作增加噪音
                     )
+
+                    # 根据搜索树得到下一个要执行的动作
                     action = self.select_action(
                         root,
                         temperature
@@ -180,6 +196,7 @@ class SelfPlay:
                         else 0,
                     )
 
+                    # 打印搜索树的信息
                     if render:
                         print(f'Tree depth: {mcts_info["max_tree_depth"]}')
                         print(
@@ -191,9 +208,11 @@ class SelfPlay:
                         opponent, stacked_observations
                     )
 
+                # 环境执行动作
                 observation, reward, done = self.game.step(action)
 
                 if render:
+                    # 渲染游戏画面
                     print(f"Played action: {self.game.action_to_string(action)}")
                     self.game.render()
 
@@ -205,6 +224,7 @@ class SelfPlay:
                 game_history.reward_history.append(reward)
                 game_history.to_play_history.append(self.game.to_play())
 
+        # 返回一轮游戏的样本记录
         return game_history
 
     def close_game(self):
@@ -270,17 +290,25 @@ class SelfPlay:
         Select action according to the visit count distribution and the temperature.
         The temperature is changed dynamically with the visit_softmax_temperature function
         in the config.
+
+        node: 搜索树的起始节点
+        temperature: 温度参数，控制动作选择的随机性
         """
+        # 获取当前节点所有子节点被访问的次数
         visit_counts = numpy.array(
             [child.visit_count for child in node.children.values()], dtype="int32"
         )
+        # 或者当前节点的所有子节点的动作
         actions = [action for action in node.children.keys()]
         if temperature == 0:
+            # 如果温度为0，则选择访问次数最多的动作
             action = actions[numpy.argmax(visit_counts)]
         elif temperature == float("inf"):
+            # 如果温度为无穷大，则随机选择一个动作
             action = numpy.random.choice(actions)
         else:
             # See paper appendix Data Generation
+            # 根据被访问的次数计算动作的概率分布选择动作
             visit_count_distribution = visit_counts ** (1 / temperature)
             visit_count_distribution = visit_count_distribution / sum(
                 visit_count_distribution
@@ -359,6 +387,8 @@ class MCTS:
             assert set(legal_actions).issubset(
                 set(self.config.action_space)
             ), "Legal actions should be a subset of the action space."
+            # 将预测的动作、奖励、隐藏状态传给根节点
+            # 这里的hidden_state是一个tensor，表示的是当前的状态嵌入
             root.expand(
                 legal_actions,
                 to_play,
@@ -368,26 +398,33 @@ class MCTS:
             )
 
         if add_exploration_noise:
+            # 给根节点每个动作添加噪音
             root.add_exploration_noise(
                 dirichlet_alpha=self.config.root_dirichlet_alpha,
                 exploration_fraction=self.config.root_exploration_fraction,
             )
 
+        # 这里的min_max_stats是一个类，主要是用来记录搜索树的最大值和最小值 todo
         min_max_stats = MinMaxStats()
 
         max_tree_depth = 0
+        # num_simulations 这里是一个超参数，表示的是模拟搜索的次数
         for _ in range(self.config.num_simulations):
-            virtual_to_play = to_play
-            node = root
-            search_path = [node]
-            current_tree_depth = 0
+            virtual_to_play = to_play # 当前的玩家
+            node = root # 当前的节点
+            search_path = [node] # 搜索路径 记录从当前node搜索到叶子节点的路径
+            current_tree_depth = 0 # 记录当前的搜索深度
 
+            # 如果当前的节点还有可以执行的动作，就继续搜索
             while node.expanded():
-                current_tree_depth += 1
+                current_tree_depth += 1 # 探索深度加1
+                # 获取当前节点的下一个要执行的动作以及动作对应的子节点
                 action, node = self.select_child(node, min_max_stats)
+                # 将下一个节点添加到搜索路径中
                 search_path.append(node)
 
                 # Players play turn by turn
+                # 动作执行完毕，切换
                 if virtual_to_play + 1 < len(self.config.players):
                     virtual_to_play = self.config.players[virtual_to_play + 1]
                 else:
@@ -395,11 +432,16 @@ class MCTS:
 
             # Inside the search tree we use the dynamics function to obtain the next hidden
             # state given an action and the previous hidden state
+            # 看mdn的注释，表示的是当前节点的父节点
             parent = search_path[-2]
+            # action: 表示到达当前节点执行的动作
+            # hidden_state: 表示当父节点的隐藏状态
+            # 得到下一个状态的Q价值，执行当前动作得到的奖励，下一个状态的动作logits，下一个动作的Q价值
             value, reward, policy_logits, hidden_state = model.recurrent_inference(
                 parent.hidden_state,
                 torch.tensor([[action]]).to(parent.hidden_state.device),
             )
+            # 将Q价值分布和奖励分布转换为标量值，也就是期望值
             value = models.support_to_scalar(value, self.config.support_size).item()
             reward = models.support_to_scalar(reward, self.config.support_size).item()
             node.expand(
@@ -410,24 +452,36 @@ class MCTS:
                 hidden_state,
             )
 
+            # 更新链路的价值
             self.backpropagate(search_path, value, virtual_to_play, min_max_stats)
 
+            # 探索数的最大深度
             max_tree_depth = max(max_tree_depth, current_tree_depth)
 
+        # 记录探索的最大深度和根节点的价值
         extra_info = {
             "max_tree_depth": max_tree_depth,
             "root_predicted_value": root_predicted_value,
         }
+        # root：表示搜索树的根节点
+        # extra_info：表示搜索树的额外信息: 记录探索的最大深度和根节点的价值
         return root, extra_info
 
     def select_child(self, node, min_max_stats):
         """
         Select the child with the highest UCB score.
+        node: 当前节点
+        min_max_stats: 记录搜索树的最大值和最小值 todo
+
+        returns: 选择的动作，获取对应动作的子节点
         """
+        # for action, child in node.children.items(): 获取当前节点的所有子节点（也就是能够执行的动作）
+        # 计算每个子节点的UCB分数，获取最大的UCB分数
         max_ucb = max(
             self.ucb_score(node, child, min_max_stats)
             for action, child in node.children.items()
         )
+        # 从所有最大UCB分数中的动作随机选择一个
         action = numpy.random.choice(
             [
                 action
@@ -440,48 +494,90 @@ class MCTS:
     def ucb_score(self, parent, child, min_max_stats):
         """
         The score for a node is based on its value, plus an exploration bonus based on the prior.
+        parent: 父节点
+        child: 子节点
+        min_max_stats: 记录搜索树的最大值和最小值 todo
         """
+        # pb_c_base和pb_c_init是两个超参数，表示的是UCB的探索系数
+        # 这里的pb_c是一个超参数，表示的是UCB的探索系数 todo 在哪里用到
         pb_c = (
             math.log(
                 (parent.visit_count + self.config.pb_c_base + 1) / self.config.pb_c_base
             )
             + self.config.pb_c_init
         )
+        # 计算探索强度
+        '''
+        基于父节点访问次数和子节点访问次数的比率
+        与网络预测的先验概率相乘
+        访问次数少的节点会获得更高的探索分数
+        '''
         pb_c *= math.sqrt(parent.visit_count) / (child.visit_count + 1)
-
         prior_score = pb_c * child.prior
 
         if child.visit_count > 0:
-            # Mean value Q
+            # Mean value Q 如果子节点探索过
+            # 则使用子节点的价值来计算
+            # child.reward: 子节点的奖励 todo 什么时候设置的？
+            # self.config.discount：折扣系数
+            # child.value(): 当前子节点的价值 针对单人游戏
+            # -child.value()：如果是双人游戏，则使用负的子节点价值，因为如果下一步对手的更具备优势则扣除的优势更多，确实符合设计
+            # normalize：将当前的奖励和折扣后的价值进行归一化
+            # value_score: 子节点的价值
             value_score = min_max_stats.normalize(
                 child.reward
                 + self.config.discount
                 * (child.value() if len(self.config.players) == 1 else -child.value())
             )
         else:
+            # 如果子节点没有探索过
+            # 则子节点的的价值分数为0
             value_score = 0
-
+        
+        # 探索分数+价值分数=UCB分数
         return prior_score + value_score
 
     def backpropagate(self, search_path, value, to_play, min_max_stats):
         """
         At the end of a simulation, we propagate the evaluation all the way up the tree
         to the root.
+        该方法主要适用于更新每个节点的价值和访问次数
+        更新整个链路中的最大价值和最小价值
+        这样才能够保证每个节点的价值都是最新的，找到最具有价值的节点
+
+        search_path: 搜索路径
+        value: 价值，当前节点的Q价值
+        to_play: 玩家的id
+        min_max_stats: 记录搜索树的最大值和最小值 记录的是搜索树中的bellman方程计算得到的最大值和最小值
+        会在这里更新搜索树的最大值和最小值
         """
         if len(self.config.players) == 1:
+            # 只有一个玩家的情况
+            # 搜索路径是从叶子节点到顶节点
             for node in reversed(search_path):
-                node.value_sum += value
-                node.visit_count += 1
-                min_max_stats.update(node.reward + self.config.discount * node.value())
+                node.value_sum += value # 这里统计的是当前节点后续所有的Q价值总和
+                node.visit_count += 1 # 被访问的次数
+                min_max_stats.update(node.reward + self.config.discount * node.value()) # 更新当前搜索树中的bellman方程计算得到的最大值和最小值
 
+                # 这里的value时真正的bellman方程计算得到的价值，因为value就是当前节点的Q价值
+                # 而上面的value和value_sum以及被访问的次数有关系，如果访问次数少，价值大则大
+                # 如果访问次数多但是价值小则小
                 value = node.reward + self.config.discount * value
 
         elif len(self.config.players) == 2:
+            # 两个玩家的游戏
             for node in reversed(search_path):
+                # 这里计算value的时候要注意，如果上一个节点不是当前玩家则增加的价值为负号，理由
+                # 就是如果对方的回合那么肯定是对方的价值增加了，而当前玩家的价值减少了
                 node.value_sum += value if node.to_play == to_play else -value
                 node.visit_count += 1
+                # 这里的node之所以是负数，是因为value通常指的是下一个状态的价值
+                # 而下一个状态肯定是对方的状态，所以要取反
                 min_max_stats.update(node.reward + self.config.discount * -node.value())
 
+                # 这里value之所以不是负数就是因为这个的value已经考虑到了负数
+                # 而奖励才需要根据当前玩家的id来决定是正数还是负数，因为对方得到了分数
+                # 那么对于另一个玩家就是不利的，需要扣除
                 value = (
                     -node.reward if node.to_play == to_play else node.reward
                 ) + self.config.discount * value
@@ -492,26 +588,33 @@ class MCTS:
 
 class Node:
     def __init__(self, prior):
-        self.visit_count = 0
+        self.visit_count = 0 # 当前节点的访问次数
         self.to_play = -1
         self.prior = prior
         self.value_sum = 0
-        self.children = {}
+        self.children = {} # 动作和对应的节点
         self.hidden_state = None
         self.reward = 0
 
     def expanded(self):
+        # 这里表示当前节点是否有子节点，而自节点的子节点就是动作
         return len(self.children) > 0
 
     def value(self):
         if self.visit_count == 0:
+            # 如果访问的次数是0则价值为0
             return 0
+        # 如果存在访问次数，则返回当前节点的价值
+        # 这里的value_sum是当前节点的价值总和
+        # visit_count是当前节点的访问次数
         return self.value_sum / self.visit_count
 
     def expand(self, actions, to_play, reward, policy_logits, hidden_state):
         """
         We expand a node using the value, reward and policy prediction obtained from the
         neural network.
+        将当前节点计算出来的所有可能的动作创建子节点添加到当前节点中
+        并得到当前节点获取的奖励和价值
 
         actions: 所有可能的动作
         to_play: 玩家的id
@@ -523,10 +626,12 @@ class Node:
         self.reward = reward
         self.hidden_state = hidden_state
 
+        # 这里就是很明显的将动作和对应的概率分布进行映射
         policy_values = torch.softmax(
             torch.tensor([policy_logits[0][a] for a in actions]), dim=0
         ).tolist()
         policy = {a: policy_values[i] for i, a in enumerate(actions)}
+        # 为每个动作制作一个节点，用于后续的动作选择
         for action, p in policy.items():
             self.children[action] = Node(p)
 
@@ -535,34 +640,47 @@ class Node:
         At the start of each search, we add dirichlet noise to the prior of the root to
         encourage the search to explore new actions.
         """
+        # 或者当前节点的能够执行的所有动作
         actions = list(self.children.keys())
+        # 这里的dirichlet_alpha是一个超参数，表示的是噪音的强度 todo
+        # numpy.random.dirichlet([dirichlet_alpha] * len(actions))：生成一个dirichlet分布的噪音
         noise = numpy.random.dirichlet([dirichlet_alpha] * len(actions))
+        # frac是一个加权超参数，用于控制噪音的强度
         frac = exploration_fraction
         for a, n in zip(actions, noise):
+            # todo 这里prior的作用？难道是影响到离散动作的概率分布吗
             self.children[a].prior = self.children[a].prior * (1 - frac) + n * frac
 
 
 class GameHistory:
     """
     Store only usefull information of a self-play game.
+    记录一个生命周期内的游戏执行的状态信息，连续存储
     """
 
     def __init__(self):
         self.observation_history = [] # 环境观察
         self.action_history = [] # 执行的动作
         self.reward_history = [] # 奖励
-        self.to_play_history = [] # todo
-        self.child_visits = [] # todo
-        self.root_values = [] # todo
-        self.reanalysed_predicted_root_values = None # todo
-        # For PER
+        self.to_play_history = [] # 记录玩家的id
+        self.child_visits = [] # 记录一轮游戏中，每次状态的子节点的访问次数占比
+        self.root_values = [] # 记录一轮游戏中的每次执行的动作的价值
+        self.reanalysed_predicted_root_values = None # 记录一个样本周期内每个观察的预测价值总和，这里是使用最新的模型对整体的价值进行重新估计，提高更加准确的价值估计
+        # For PER 训练数据的优先级
         self.priorities = None # todo
         self.game_priority = None # todo
 
     def store_search_statistics(self, root, action_space):
         # Turn visit count from root into a policy
+        # 存储游戏过程中的搜索树的统计信息
+        # root：表示搜索树的根节点
+        # action_space：表示所有的动作空间
+        # 这里的action_space是一个离散动作空间
         if root is not None:
+            # 统计所有子节点的访问次数
             sum_visits = sum(child.visit_count for child in root.children.values())
+            # 统计所有动作的访问次数在所有动作中的占比，如果不在子节点中则为0
+            # todo 作用
             self.child_visits.append(
                 [
                     root.children[a].visit_count / sum_visits
@@ -572,6 +690,7 @@ class GameHistory:
                 ]
             )
 
+            # 
             self.root_values.append(root.value())
         else:
             self.root_values.append(None)
@@ -585,6 +704,7 @@ class GameHistory:
 
         index： 我看到有传入-1
         num_stacked_observations：需要堆叠的历史帧长度num_stacked_observations
+        action_space_size：动作空间的维度
         """
         # Convert to positive index 
         # 如果传入-1，则表示获取缓冲区最后一个数据

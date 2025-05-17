@@ -233,7 +233,13 @@ class MuZeroFullyConnectedNetwork(AbstractNetwork):
         )
 
     def recurrent_inference(self, encoded_state, action):
+        # encoded_state: 经过特征提取后的状态
+        # action: 当前动作
+        # return: 返回下一个状态的价值，当前状态+动作的奖励，动作的logits，预测的下一个状态的特征
+
+        # 得到预测的下一个状态的特征和奖励
         next_encoded_state, reward = self.dynamics(encoded_state, action)
+        # 预测下一个状态的动作和Q价值
         policy_logits, value = self.prediction(next_encoded_state)
         return value, reward, policy_logits, next_encoded_state
 
@@ -431,6 +437,14 @@ class DynamicsNetwork(torch.nn.Module):
         full_support_size,
         block_output_size_reward,
     ):
+        '''
+        num_blocks: 残差块的数量
+        num_channels：resnet输出的卷积通道数
+        reduced_channels_reward：输出的奖励通道数
+        fc_reward_layers：全链接层的层数
+        full_support_size：奖励的输出维度，就是说输出的奖励是个分布，用于后续计算期望值，类似C51
+        block_output_size_reward：卷积后输入到全链接层的展平后的大小
+        '''
         super().__init__()
         self.conv = conv3x3(num_channels, num_channels - 1)
         self.bn = torch.nn.BatchNorm2d(num_channels - 1)
@@ -599,7 +613,8 @@ class MuZeroResidualNetwork(AbstractNetwork):
             )
         )
 
-        # todo 这里的作用
+        # 该层传入当前的状态特征和采取的动作
+        # 预测下一个状态的特征和奖励
         self.dynamics_network = torch.nn.DataParallel(
             DynamicsNetwork(
                 num_blocks,
@@ -677,34 +692,48 @@ class MuZeroResidualNetwork(AbstractNetwork):
 
     def dynamics(self, encoded_state, action):
         # Stack encoded_state with a game specific one hot encoded action (See paper appendix Network Architecture)
+        '''
+        encoded_state: 经过特征提取后的环境状态
+        action: 当前动作
+
+        return: 返回下一个状态的特征(归一化后)和奖励
+        '''
+        # 这里的作用是将当前动作转化为one-hot编码，并与环境特征拼接
         action_one_hot = (
             torch.ones(
                 (
-                    encoded_state.shape[0],
-                    1,
-                    encoded_state.shape[2],
-                    encoded_state.shape[3],
+                    encoded_state.shape[0], # batch_size
+                    1, # 动作通道的维度
+                    encoded_state.shape[2], # 高度 和观察空间一致
+                    encoded_state.shape[3], # 宽度 和观察空间一致
                 )
             )
             .to(action.device)
             .float()
         )
+        # 将动作扩展到和特征相同的维度，并归一化为0～1之间
+        # action[:, :, None, None]：将动作tensor从 [32, 1] 扩展为 [32, 1, 1, 1]
+        # 这么做是为了方便了观察空间拼接
         action_one_hot = (
             action[:, :, None, None] * action_one_hot / self.action_space_size
         )
+        # 拼接特征和动作
         x = torch.cat((encoded_state, action_one_hot), dim=1)
+        # 得到预测的下一个状态特征和奖励
         next_encoded_state, reward = self.dynamics_network(x)
 
         # Scale encoded state between [0, 1] (See paper appendix Training)
+        # 找到状态特征中每个通道的最小值
         min_next_encoded_state = (
             next_encoded_state.view(
-                -1,
-                next_encoded_state.shape[1],
-                next_encoded_state.shape[2] * next_encoded_state.shape[3],
+                -1, # batch_size
+                next_encoded_state.shape[1], # 通道数
+                next_encoded_state.shape[2] * next_encoded_state.shape[3], # 展平
             )
             .min(2, keepdim=True)[0]
             .unsqueeze(-1)
         )
+        # 找到状态特征中每个通道的最大值
         max_next_encoded_state = (
             next_encoded_state.view(
                 -1,
@@ -714,8 +743,12 @@ class MuZeroResidualNetwork(AbstractNetwork):
             .max(2, keepdim=True)[0]
             .unsqueeze(-1)
         )
+        # 计算特征的差值
         scale_next_encoded_state = max_next_encoded_state - min_next_encoded_state
+        # 如果差值太小则增加1e-5
+        # 这里的作用是防止除0错误
         scale_next_encoded_state[scale_next_encoded_state < 1e-5] += 1e-5
+        # 归一化特征
         next_encoded_state_normalized = (
             next_encoded_state - min_next_encoded_state
         ) / scale_next_encoded_state
@@ -749,6 +782,8 @@ class MuZeroResidualNetwork(AbstractNetwork):
         )
 
     def recurrent_inference(self, encoded_state, action):
+        # encoded_state: 经过特征提取后的状态
+        # action: 当前动作
         next_encoded_state, reward = self.dynamics(encoded_state, action)
         policy_logits, value = self.prediction(next_encoded_state)
         return value, reward, policy_logits, next_encoded_state
@@ -825,17 +860,34 @@ def scalar_to_support(x, support_size):
     """
     Transform a scalar to a categorical representation with (2 * support_size + 1) categories
     See paper appendix Network Architecture
+    将一个标量转换为一个多维度的向量,使得最后的期望已久和标量一致
     """
+    # todo 查看这个论文
     # Reduce the scale (defined in https://arxiv.org/abs/1805.11593)
+    # 对标量进行缩放
+    '''
+    保持符号不变(torch.sign(x))
+    压缩数值范围，使大值的变化更平滑
+    添加小的线性项(0.001 * x)防止梯度消失
+    '''
     x = torch.sign(x) * (torch.sqrt(torch.abs(x) + 1) - 1) + 0.001 * x
 
     # Encode on a vector
+    # 将x限制在一定的范围内
+    '''
+    将值限制在 [-support_size, support_size] 范围内
+    分离整数和小数部分
+    '''
     x = torch.clamp(x, -support_size, support_size)
     floor = x.floor()
     prob = x - floor
+    # 创建一个维度为（batach_size, 1, 2 * support_size + 1)的全零向量
     logits = torch.zeros(x.shape[0], x.shape[1], 2 * support_size + 1).to(x.device)
+    # # 将 1-prob 放在floor对应位置
     logits.scatter_(
-        2, (floor + support_size).long().unsqueeze(-1), (1 - prob).unsqueeze(-1)
+        2,  # # 在第3个维度上分散
+        (floor + support_size).long().unsqueeze(-1), # # 索引
+        (1 - prob).unsqueeze(-1) # # 值
     )
     indexes = floor + support_size + 1
     prob = prob.masked_fill_(2 * support_size < indexes, 0.0)

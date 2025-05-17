@@ -233,10 +233,13 @@ num_gpus_per_worker = 4 / (1 + 10 + 1 + 1) = 4/13 ≈ 0.31
             )
             for self_play_worker in self.self_play_workers
         ]
+        # 训练模型权重
+        # 验证不使用MCTS的情况下child_visits是怎么处理的
         self.training_worker.continuous_update_weights.remote(
             self.replay_buffer_worker, self.shared_storage_worker
         )
         if self.config.use_last_model_value:
+            # 开启重分析的worker，使用最新的模型来分析状态的价值，使得价值更加准确
             self.reanalyse_worker.reanalyse.remote(
                 self.replay_buffer_worker, self.shared_storage_worker
             )
@@ -260,6 +263,7 @@ num_gpus_per_worker = 4 / (1 + 10 + 1 + 1) = 4/13 ≈ 0.31
             self.config,
             self.config.seed + self.config.num_workers,
         )
+        # 测试模型
         self.test_worker.continuous_self_play.remote(
             self.shared_storage_worker, None, True
         )
