@@ -106,7 +106,7 @@ class MuZero:
 
         # Checkpoint and replay buffer used to initialize workers
         self.checkpoint = {
-            "weights": None,
+            "weights": None, # cpu_actor的权重
             "optimizer_state": None,
             "total_reward": 0,
             "muzero_reward": 0,
